@@ -52,6 +52,7 @@ public enum class ComputeSchedulerEnum {
     Timeshift,
     ProvisionedCpuGpuCores,
     ProvisionedCpuGpuCoresInv,
+    Heft,
 }
 
 public fun createPrefabComputeScheduler(
@@ -159,5 +160,7 @@ public fun createPrefabComputeScheduler(
                         VGpuWeigher(gpuAllocationRatio, multiplier = -1.0),
                     ),
             )
+        ComputeSchedulerEnum.Heft ->
+            HeftScheduler()
     }
 }
