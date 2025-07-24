@@ -50,9 +50,10 @@ public enum class ComputeSchedulerEnum {
     Random,
     TaskNumMemorizing,
     Timeshift,
+    Heft,
+    HeftCarbonAware,
     ProvisionedCpuGpuCores,
     ProvisionedCpuGpuCoresInv,
-    Heft,
 }
 
 public fun createPrefabComputeScheduler(
@@ -134,6 +135,14 @@ public fun createPrefabComputeScheduler(
                 clock = clock,
                 random = SplittableRandom(seeder.nextLong()),
             )
+        ComputeSchedulerEnum.Heft ->
+            HeftScheduler()
+        ComputeSchedulerEnum.HeftCarbonAware ->
+            HeftCarbonAwareScheduler(
+                clock = clock,
+                filters = listOf(ComputeFilter(), VCpuFilter(cpuAllocationRatio), RamFilter(ramAllocationRatio)),
+                random = SplittableRandom(seeder.nextLong()),
+            )
         ComputeSchedulerEnum.ProvisionedCpuGpuCores ->
             FilterScheduler(
                 filters =
@@ -160,7 +169,5 @@ public fun createPrefabComputeScheduler(
                         VGpuWeigher(gpuAllocationRatio, multiplier = -1.0),
                     ),
             )
-        ComputeSchedulerEnum.Heft ->
-            HeftScheduler()
     }
 }

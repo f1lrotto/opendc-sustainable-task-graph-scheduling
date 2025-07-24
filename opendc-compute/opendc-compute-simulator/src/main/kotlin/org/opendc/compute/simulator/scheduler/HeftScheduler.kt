@@ -26,15 +26,15 @@ import org.opendc.compute.simulator.service.HostView
 import org.opendc.compute.simulator.service.ServiceTask
 
 
-public class HeftScheduler : ComputeScheduler {
-    private val hosts = mutableListOf<HostView>()
-    private val upwardRanks = mutableMapOf<Int, Double>()
-    private val hostFinishTimes = mutableMapOf<HostView, Long>()
-    private val taskFinishTimes = mutableMapOf<Int, Long>()
-    private val taskAssignments = mutableMapOf<Int, HostView>()
-    private val allTasks = mutableMapOf<Int, ServiceTask>()
-    private val prioritizedTasks = mutableListOf<ServiceTask>()
-    private var needsPriorityRecomputation = true
+public open class HeftScheduler : ComputeScheduler {
+    protected val hosts = mutableListOf<HostView>()
+    protected val upwardRanks = mutableMapOf<Int, Double>()
+    protected val hostFinishTimes = mutableMapOf<HostView, Long>()
+    protected val taskFinishTimes = mutableMapOf<Int, Long>()
+    protected val taskAssignments = mutableMapOf<Int, HostView>()
+    protected val allTasks = mutableMapOf<Int, ServiceTask>()
+    protected val prioritizedTasks = mutableListOf<ServiceTask>()
+    protected var needsPriorityRecomputation = true
 
     override fun addHost(host: HostView) {
         hosts.add(host)
@@ -103,7 +103,7 @@ public class HeftScheduler : ComputeScheduler {
     }
 
 
-    private fun recomputeTaskPriorities() {
+    protected fun recomputeTaskPriorities() {
         upwardRanks.clear()
 
         for (task in allTasks.values) {
@@ -116,7 +116,7 @@ public class HeftScheduler : ComputeScheduler {
     }
 
 
-    private fun selectHighestPriorityTask(availableTasks: List<SchedulingRequest>): SchedulingRequest? {
+    protected fun selectHighestPriorityTask(availableTasks: List<SchedulingRequest>): SchedulingRequest? {
         // Convert available tasks to a set for quick lookup
         val availableTaskIds = availableTasks.map { it.task.id }.toSet()
 
@@ -130,7 +130,7 @@ public class HeftScheduler : ComputeScheduler {
     }
 
 
-    private fun selectBestHost(task: ServiceTask): HostView? {
+    protected fun selectBestHost(task: ServiceTask): HostView? {
         var bestHost: HostView? = null
         var earliestFinishTime = Long.MAX_VALUE
 
@@ -149,7 +149,7 @@ public class HeftScheduler : ComputeScheduler {
         return bestHost
     }
 
-    private fun canHostTask(
+    protected fun canHostTask(
         host: HostView,
         task: ServiceTask,
     ): Boolean {
@@ -159,7 +159,7 @@ public class HeftScheduler : ComputeScheduler {
             host.availableMemory >= flavor.memorySize
     }
 
-    private fun calculateEarliestFinishTime(
+    protected fun calculateEarliestFinishTime(
         task: ServiceTask,
         host: HostView,
     ): Long {
@@ -170,7 +170,7 @@ public class HeftScheduler : ComputeScheduler {
         return earliestStartTime + executionTime
     }
 
-    private fun calculateEarliestStartTime(
+    protected fun calculateEarliestStartTime(
         task: ServiceTask,
         host: HostView,
     ): Long {
@@ -182,7 +182,7 @@ public class HeftScheduler : ComputeScheduler {
     }
 
 
-    private fun getParentFinishTime(task: ServiceTask): Long {
+    protected fun getParentFinishTime(task: ServiceTask): Long {
         val parents = task.flavor.parents
         if (parents.isEmpty()) {
             return 0L
@@ -198,7 +198,7 @@ public class HeftScheduler : ComputeScheduler {
         return maxParentFinishTime
     }
 
-    private fun estimateExecutionTime(
+    protected fun estimateExecutionTime(
         task: ServiceTask,
         host: HostView,
     ): Long {
@@ -216,7 +216,7 @@ public class HeftScheduler : ComputeScheduler {
     }
 
 
-    private fun computeUpwardRank(taskId: Int): Double {
+    protected fun computeUpwardRank(taskId: Int): Double {
         // Return cached value if already computed
         if (upwardRanks.containsKey(taskId)) {
             return upwardRanks[taskId]!!
@@ -251,7 +251,7 @@ public class HeftScheduler : ComputeScheduler {
         return rank
     }
 
-    private fun estimateAverageExecutionTime(task: ServiceTask): Double {
+    protected fun estimateAverageExecutionTime(task: ServiceTask): Double {
         if (hosts.isEmpty()) return task.duration.toMillis().toDouble()
 
         val totalTime =
@@ -260,5 +260,12 @@ public class HeftScheduler : ComputeScheduler {
             }
 
         return totalTime / hosts.size
+    }
+
+
+    protected fun updateTaskAssignment(task: ServiceTask, host: HostView, finishTime: Long) {
+        hostFinishTimes[host] = finishTime
+        taskFinishTimes[task.id] = finishTime
+        taskAssignments[task.id] = host
     }
 }
