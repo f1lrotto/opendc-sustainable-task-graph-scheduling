@@ -48,6 +48,10 @@ public open class HeftScheduler : ComputeScheduler {
     }
 
     override fun select(iter: MutableIterator<SchedulingRequest>): SchedulingResult {
+        return select(iter, emptyList())
+    }
+
+    override fun select(iter: MutableIterator<SchedulingRequest>, blockedTasks: List<SchedulingRequest>): SchedulingResult {
         if (hosts.isEmpty()) {
             return SchedulingResult(SchedulingResultType.FAILURE)
         }
@@ -56,9 +60,16 @@ public open class HeftScheduler : ComputeScheduler {
         val availableTasks = mutableListOf<SchedulingRequest>()
         while (iter.hasNext()) {
             val req = iter.next()
-            if (!req.isCancelled) {
+            if (!req.isCancelled && isTaskSchedulable(req.task)) {
                 allTasks[req.task.id] = req.task
                 availableTasks.add(req)
+            }
+        }
+
+        // Also add blocked tasks to our task registry for complete DAG visibility
+        for (req in blockedTasks) {
+            if (!req.isCancelled) {
+                allTasks[req.task.id] = req.task
             }
         }
 
@@ -267,5 +278,20 @@ public open class HeftScheduler : ComputeScheduler {
         hostFinishTimes[host] = finishTime
         taskFinishTimes[task.id] = finishTime
         taskAssignments[task.id] = host
+    /**
+     * Check if a task is in a state that allows it to be scheduled.
+     * Tasks that are already running, completed, terminated, or failed should not be scheduled again.
+     */
+    private fun isTaskSchedulable(task: ServiceTask): Boolean {
+        return when (task.state) {
+            org.opendc.compute.api.TaskState.CREATED,
+            org.opendc.compute.api.TaskState.PROVISIONING -> true
+            org.opendc.compute.api.TaskState.RUNNING,
+            org.opendc.compute.api.TaskState.COMPLETED,
+            org.opendc.compute.api.TaskState.TERMINATED,
+            org.opendc.compute.api.TaskState.FAILED,
+            org.opendc.compute.api.TaskState.PAUSED,
+            org.opendc.compute.api.TaskState.DELETED -> false
+        }
     }
 }
