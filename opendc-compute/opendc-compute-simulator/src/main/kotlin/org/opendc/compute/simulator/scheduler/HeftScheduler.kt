@@ -48,6 +48,10 @@ public class HeftScheduler : ComputeScheduler {
     }
 
     override fun select(iter: MutableIterator<SchedulingRequest>): SchedulingResult {
+        return select(iter, emptyList())
+    }
+
+    override fun select(iter: MutableIterator<SchedulingRequest>, blockedTasks: List<SchedulingRequest>): SchedulingResult {
         if (hosts.isEmpty()) {
             return SchedulingResult(SchedulingResultType.FAILURE)
         }
@@ -59,6 +63,13 @@ public class HeftScheduler : ComputeScheduler {
             if (!req.isCancelled) {
                 allTasks[req.task.id] = req.task
                 availableTasks.add(req)
+            }
+        }
+
+        // Also add blocked tasks to our task registry for complete DAG visibility
+        for (req in blockedTasks) {
+            if (!req.isCancelled) {
+                allTasks[req.task.id] = req.task
             }
         }
 
