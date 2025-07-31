@@ -49,6 +49,19 @@ public interface ComputeScheduler {
     public fun select(iter: MutableIterator<SchedulingRequest>): SchedulingResult
 
     /**
+     * Select a host for the specified [iter] with additional context about blocked tasks.
+     * This method allows schedulers to see the full DAG including tasks that are currently blocked by dependencies.
+     *
+     * @param iter The iterator over available tasks to select a host for.
+     * @param blockedTasks The list of tasks that are currently blocked by dependencies.
+     * @return The host to schedule the server on or `null` if no server is available.
+     */
+    public fun select(iter: MutableIterator<SchedulingRequest>, blockedTasks: List<SchedulingRequest>): SchedulingResult {
+        // Default implementation for backward compatibility
+        return select(iter)
+    }
+
+    /**
      * Inform the scheduler that a [task] has been removed from the [host].
      * Could be due to completion or failure.
      */
