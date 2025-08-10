@@ -22,19 +22,20 @@
 
 package org.opendc.compute.simulator.scheduler
 
+import org.opendc.compute.api.TaskState
 import org.opendc.compute.simulator.service.HostView
 import org.opendc.compute.simulator.service.ServiceTask
 
 
 public open class HeftScheduler : ComputeScheduler {
-    protected val hosts = mutableListOf<HostView>()
-    protected val upwardRanks = mutableMapOf<Int, Double>()
-    protected val hostFinishTimes = mutableMapOf<HostView, Long>()
-    protected val taskFinishTimes = mutableMapOf<Int, Long>()
-    protected val taskAssignments = mutableMapOf<Int, HostView>()
-    protected val allTasks = mutableMapOf<Int, ServiceTask>()
-    protected val prioritizedTasks = mutableListOf<ServiceTask>()
-    protected var needsPriorityRecomputation = true
+    protected val hosts: MutableList<HostView> = mutableListOf<HostView>()
+    protected val upwardRanks: MutableMap<Int, Double> = mutableMapOf<Int, Double>()
+    protected val hostFinishTimes: MutableMap<HostView, Long> = mutableMapOf<HostView, Long>()
+    protected val taskFinishTimes: MutableMap<Int, Long> = mutableMapOf<Int, Long>()
+    protected val taskAssignments: MutableMap<Int, HostView> = mutableMapOf<Int, HostView>()
+    protected val allTasks: MutableMap<Int, ServiceTask> = mutableMapOf<Int, ServiceTask>()
+    protected val prioritizedTasks: MutableList<ServiceTask> = mutableListOf<ServiceTask>()
+    protected var needsPriorityRecomputation: Boolean = true
 
     override fun addHost(host: HostView) {
         hosts.add(host)
@@ -278,20 +279,22 @@ public open class HeftScheduler : ComputeScheduler {
         hostFinishTimes[host] = finishTime
         taskFinishTimes[task.id] = finishTime
         taskAssignments[task.id] = host
+    }
+
     /**
      * Check if a task is in a state that allows it to be scheduled.
      * Tasks that are already running, completed, terminated, or failed should not be scheduled again.
      */
     private fun isTaskSchedulable(task: ServiceTask): Boolean {
         return when (task.state) {
-            org.opendc.compute.api.TaskState.CREATED,
-            org.opendc.compute.api.TaskState.PROVISIONING -> true
-            org.opendc.compute.api.TaskState.RUNNING,
-            org.opendc.compute.api.TaskState.COMPLETED,
-            org.opendc.compute.api.TaskState.TERMINATED,
-            org.opendc.compute.api.TaskState.FAILED,
-            org.opendc.compute.api.TaskState.PAUSED,
-            org.opendc.compute.api.TaskState.DELETED -> false
+            TaskState.CREATED,
+            TaskState.PROVISIONING -> true
+            TaskState.RUNNING,
+            TaskState.COMPLETED,
+            TaskState.TERMINATED,
+            TaskState.FAILED,
+            TaskState.PAUSED,
+            TaskState.DELETED -> false
         }
     }
 }
