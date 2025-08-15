@@ -48,17 +48,13 @@ public class HeftCarbonAwareScheduler(
     private val forecast: Boolean = true,
     private val shortForecastThreshold: Double = 0.20,
     private val longForecastThreshold: Double = 0.35,
-    private val forecastSize: Int = 24,
-    private val windowSize: Int = 24,
+    private val forecastSize: Int = 128,
+    private val windowSize: Int = 128,
     // Guardrails to limit excessive deferral
     private val maxSkipsPerTask: Int = 6,
-    // Soft makespan stretch vs baseline HEFT
-    private val rho: Double = 1.05,
     // Planning knobs
-    private val lockHorizon: Duration = Duration.ofHours(3),
-    private val replanEvery: Duration = Duration.ofMinutes(60),
-    private val minGain_gCO2: Double = 0.0,
-    private val maxDeferralPerEpoch: Duration = Duration.ofHours(2),
+    private val replanEvery: Duration = Duration.ofMinutes(15),
+    private val maxDeferralPerEpoch: Duration = Duration.ofHours(128),
 ) : HeftScheduler(), CarbonReceiver {
     // Carbon model state (simplified copy of Timeshifter logic)
     private var carbonMod: CarbonModel? = null
@@ -70,6 +66,10 @@ public class HeftCarbonAwareScheduler(
     // Baseline/makespan windows (minimal viable scaffolding)
     private var lastReplanAt: Instant = Instant.EPOCH
     private val latestStartTime: MutableMap<Int, Instant> = mutableMapOf()
+
+    // Additional rank structures for critical-path reasoning
+    private val downwardRanks: MutableMap<Int, Double> = mutableMapOf()
+    private var criticalPathLength: Double = 0.0
 
     /**
      * CarbonReceiver hook.
@@ -175,25 +175,19 @@ public class HeftCarbonAwareScheduler(
                 continue
             }
 
-            // Carbon-aware temporal shifting for deferrable tasks using arg-min valley
-            if (task.nature.deferrable) {
-                val deadline = Instant.ofEpochMilli(task.deadline)
-                // Window [EST, LST]
-                val est = maxOf(getParentReadyTime(task), now)
-                val lst = latestStartTime[task.id] ?: minOf(deadline.minus(task.duration), now.plus(maxDeferralPerEpoch))
+            // Carbon-aware temporal shifting using critical-path windows
+            val est = maxOf(getParentReadyTime(task), now)
+            val lst = latestStartTime[task.id] ?: est
 
-                if (!est.plus(task.duration).isAfter(lst)) {
-                    val choice = bestGreenStart(task, est, lst, carbonMod)
-                    if (choice != null) {
-                        val outsideLock = now.isBefore(choice.start.minus(lockHorizon))
-                        val withinCap = Duration.between(now, choice.start) <= maxDeferralPerEpoch
-                        val critical = isHighRank(task)
-                        val needGain = if (critical) minGain_gCO2 * 2 else minGain_gCO2
-                        if (outsideLock && withinCap && choice.gain_gCO2 >= needGain && req.timesSkipped < maxSkipsPerTask) {
-                            req.deferUntil = choice.start.minus(lockHorizon)
-                            req.timesSkipped += 1
-                            continue
-                        }
+            if (!est.plus(task.duration).isAfter(lst)) {
+                val choice = bestGreenStart(task, est, lst, carbonMod)
+                if (choice != null) {
+                    val outsideLock = now.isBefore(choice.start)
+                    val withinCap = Duration.between(now, choice.start) <= maxDeferralPerEpoch
+                    if (outsideLock && withinCap && req.timesSkipped < maxSkipsPerTask) {
+                        req.deferUntil = choice.start
+                        req.timesSkipped += 1
+                        continue
                     }
                 }
             }
@@ -250,12 +244,58 @@ public class HeftCarbonAwareScheduler(
     }
 
     private fun computeLatestStartsStub(now: Instant) {
-        // Minimal placeholder: derive LST from per-task deadline if present; else allow modest slack
+        // Recompute downward ranks and critical path length based on current DAG snapshot
+        downwardRanks.clear()
+        criticalPathLength = 0.0
+
+        for ((id, _) in allTasks) {
+            val rd = computeDownwardRank(id)
+            val ru = upwardRanks[id] ?: 0.0
+            val candidate = rd + ru
+            if (candidate > criticalPathLength) criticalPathLength = candidate
+        }
+
+        // For each task, calculate the maximum allowed deferral window per rules
         for ((id, task) in allTasks) {
-            val deadlineInst = Instant.ofEpochMilli(task.deadline)
-            val lstFromDeadline = deadlineInst.minus(task.duration)
-            val lstFromCap = now.plus(maxDeferralPerEpoch)
-            latestStartTime[id] = minOf(lstFromDeadline, lstFromCap)
+            val est = maxOf(getParentReadyTime(task), now)
+
+            var maxDelayMillis = Long.MAX_VALUE
+            var hasCriticalChild = false
+            var zeroDelay = false
+
+            val children = task.flavor.children
+            for (childId in children) {
+                if (!allTasks.containsKey(childId)) continue
+                if (isOnCriticalPath(childId)) {
+                    hasCriticalChild = true
+                    if (isChildWaitingOnlyForThis(task.id, childId, now)) {
+                        zeroDelay = true
+                        break
+                    } else {
+                        val longestOtherRemain = longestRemainingOfOtherParents(task.id, childId, now)
+                        val allowed = (longestOtherRemain - task.duration.toMillis()).coerceAtLeast(0L)
+                        if (allowed < maxDelayMillis) maxDelayMillis = allowed
+                    }
+                }
+            }
+
+            val delayMillis: Long =
+                when {
+                    zeroDelay -> 0L
+                    hasCriticalChild -> if (maxDelayMillis == Long.MAX_VALUE) 0L else maxDelayMillis
+                    else -> {
+                        // Neither this task nor its children are on CP: slack determines deferral
+                        val rd = downwardRanks[id] ?: 0.0
+                        val ru = upwardRanks[id] ?: 0.0
+                        val slack = (criticalPathLength - (rd + ru)).coerceAtLeast(0.0)
+                        slack.toLong()
+                    }
+                }
+
+            val capMillis = Duration.between(now, now.plus(maxDeferralPerEpoch)).toMillis()
+            val boundedDelay = delayMillis.coerceAtMost(capMillis)
+            val tasksLatestStartTime = est.plusMillis(boundedDelay)
+            latestStartTime[id] = tasksLatestStartTime
         }
     }
 
@@ -268,6 +308,82 @@ public class HeftCarbonAwareScheduler(
             if (ft > maxFinish) maxFinish = ft
         }
         return Instant.ofEpochMilli(maxFinish)
+    }
+
+    private fun computeDownwardRank(taskId: Int): Double {
+        val cached = downwardRanks[taskId]
+        if (cached != null) return cached
+
+        val task =
+            allTasks[taskId] ?: run {
+                downwardRanks[taskId] = 0.0
+                return 0.0
+            }
+
+        val parents = task.flavor.parents
+        var maxParentPath = 0.0
+        for (pid in parents) {
+            val parentTask = allTasks[pid] ?: continue
+            val parentExec = estimateAverageExecutionTime(parentTask)
+            val parentDown = computeDownwardRank(pid)
+            maxParentPath = maxOf(maxParentPath, parentDown + parentExec)
+        }
+
+        downwardRanks[taskId] = maxParentPath
+        return maxParentPath
+    }
+
+    private fun isOnCriticalPath(taskId: Int): Boolean {
+        val rd = downwardRanks[taskId] ?: 0.0
+        val ru = upwardRanks[taskId] ?: 0.0
+        val sum = rd + ru
+        if (criticalPathLength <= 0.0) return false
+        val eps = criticalPathLength * 1e-9 + 1e-6
+        return kotlin.math.abs(sum - criticalPathLength) <= eps
+    }
+
+    private fun isChildWaitingOnlyForThis(
+        parentId: Int,
+        childId: Int,
+        now: Instant,
+    ): Boolean {
+        val child = allTasks[childId] ?: return false
+        for (pid in child.flavor.parents) {
+            if (pid == parentId) continue
+            val ft = taskFinishTimes[pid]
+            if (ft == null || ft > now.toEpochMilli()) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private fun longestRemainingOfOtherParents(
+        parentId: Int,
+        childId: Int,
+        now: Instant,
+    ): Long {
+        val child = allTasks[childId] ?: return 0L
+        var longest = 0L
+        for (pid in child.flavor.parents) {
+            if (pid == parentId) continue
+            val remaining = estimateRemainingMillis(pid, now)
+            if (remaining > longest) longest = remaining
+        }
+        return longest
+    }
+
+    private fun estimateRemainingMillis(
+        taskId: Int,
+        now: Instant,
+    ): Long {
+        val finish = taskFinishTimes[taskId]
+        if (finish != null) {
+            val remaining = finish - now.toEpochMilli()
+            return remaining.coerceAtLeast(0L)
+        }
+        val t = allTasks[taskId]
+        return t?.duration?.toMillis() ?: 0L
     }
 
     private fun isHighRank(task: ServiceTask): Boolean {
@@ -293,40 +409,44 @@ public class HeftCarbonAwareScheduler(
 
         val durMillis = task.duration.toMillis()
         val stepMillis = cm.forecastStepMillis
-        val anchorMillis = cm.getForecastAnchorTimeMillis()
+        // Number of forecast steps spanned by task duration
+        val spanSteps = ((durMillis + stepMillis - 1) / stepMillis).toInt().coerceAtLeast(1)
 
-        // Baseline: if we start at est, compute its integral as comparison
-        fun integralAt(offsetSteps: Int): Double {
-            // Approximate integral by summing discrete CI over steps covered by duration
-            val steps = ((durMillis + stepMillis - 1) / stepMillis).toInt()
+        // Align the forecast series to the simulation time: anchor series[0] at the
+        // first step boundary at or after EST. We do NOT use real wall-clock anchor
+        // because simulator tasks are normalized to epoch.
+        val estMillis = est.toEpochMilli()
+        val maxStartMillis = lst.toEpochMilli() - durMillis
+        if (maxStartMillis < estMillis) return null
+        if (series.size < spanSteps) return null
+
+        val step = stepMillis.toLong()
+        val syntheticSeriesStart = ((estMillis + step - 1) / step) * step
+
+        val windowSteps = ((maxStartMillis - syntheticSeriesStart) / step).toInt().coerceAtLeast(0)
+        val maxOffset = kotlin.math.min(windowSteps, series.size - spanSteps)
+        if (maxOffset < 0) return null
+
+        fun windowSumAtOffset(offsetSteps: Int): Double {
             var sum = 0.0
-            for (k in 0 until steps) {
-                val idx = (offsetSteps + k).coerceIn(0, series.size - 1)
-                sum += series[idx]
-            }
+            for (k in 0 until spanSteps) sum += series[offsetSteps + k]
             return sum
         }
 
-        // Find bounds in steps between est..lst-dur
-        val maxStart = lst.minusMillis(durMillis)
-        if (maxStart.isBefore(est)) return null
-
-        // Align to forecast anchor
-        val startOffsetSteps = ((est.toEpochMilli() - anchorMillis) / stepMillis).toInt()
-        val totalSteps = (Duration.between(est, maxStart).toMillis() / stepMillis).toInt().coerceAtLeast(0)
-
-        val baseline = integralAt(startOffsetSteps)
-        var bestIdx = 0
+        val baseline = windowSumAtOffset(0)
+        var bestOffset = 0
         var bestVal = baseline
-        for (s in 0..totalSteps) {
-            val v = integralAt(startOffsetSteps + s)
-            if (v < bestVal) {
+
+        // Prefer latest minimal to push work to the end of slack
+        for (i in 0..maxOffset) {
+            val v = windowSumAtOffset(i)
+            if (v < bestVal || (v == bestVal && i > bestOffset)) {
                 bestVal = v
-                bestIdx = s
+                bestOffset = i
             }
         }
 
-        val bestStart = est.plusMillis(bestIdx.toLong() * stepMillis)
+        val bestStart = Instant.ofEpochMilli(syntheticSeriesStart + bestOffset.toLong() * step)
         val gain = (baseline - bestVal)
         return GreenChoice(bestStart, gain)
     }
