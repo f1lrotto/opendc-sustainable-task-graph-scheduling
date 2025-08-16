@@ -26,7 +26,6 @@ import org.opendc.compute.api.TaskState
 import org.opendc.compute.simulator.service.HostView
 import org.opendc.compute.simulator.service.ServiceTask
 
-
 public open class HeftScheduler : ComputeScheduler {
     protected val hosts: MutableList<HostView> = mutableListOf<HostView>()
     protected val upwardRanks: MutableMap<Int, Double> = mutableMapOf<Int, Double>()
@@ -37,22 +36,44 @@ public open class HeftScheduler : ComputeScheduler {
     protected val prioritizedTasks: MutableList<ServiceTask> = mutableListOf<ServiceTask>()
     protected var needsPriorityRecomputation: Boolean = true
 
+    /**
+     * Per-host allocation timeline to compute earliest feasible start times under capacity constraints.
+     */
+    private val hostSchedules: MutableMap<HostView, MutableList<Allocation>> = mutableMapOf()
+    private val taskStartTimes: MutableMap<Int, Long> = mutableMapOf()
+
+    /**
+     * An allocation interval on a host.
+     */
+    private data class Allocation(
+        val taskId: Int,
+        val start: Long,
+        val end: Long,
+        val cpuCores: Int,
+        val memory: Long,
+    )
+
     override fun addHost(host: HostView) {
         hosts.add(host)
         hostFinishTimes[host] = 0L
+        hostSchedules[host] = mutableListOf()
     }
 
     override fun removeHost(host: HostView) {
         hosts.remove(host)
         hostFinishTimes.remove(host)
         taskAssignments.values.removeAll { it == host }
+        hostSchedules.remove(host)
     }
 
     override fun select(iter: MutableIterator<SchedulingRequest>): SchedulingResult {
         return select(iter, emptyList())
     }
 
-    override fun select(iter: MutableIterator<SchedulingRequest>, blockedTasks: List<SchedulingRequest>): SchedulingResult {
+    override fun select(
+        iter: MutableIterator<SchedulingRequest>,
+        blockedTasks: List<SchedulingRequest>,
+    ): SchedulingResult {
         if (hosts.isEmpty()) {
             return SchedulingResult(SchedulingResultType.FAILURE)
         }
@@ -61,10 +82,18 @@ public open class HeftScheduler : ComputeScheduler {
         val availableTasks = mutableListOf<SchedulingRequest>()
         while (iter.hasNext()) {
             val req = iter.next()
-            if (!req.isCancelled && isTaskSchedulable(req.task)) {
-                allTasks[req.task.id] = req.task
-                availableTasks.add(req)
+            val task = req.task
+            if (req.isCancelled || !isTaskSchedulable(task)) {
+                iter.remove()
+                continue
             }
+            if (!allTasks.containsKey(task.id)) {
+                allTasks[task.id] = task
+                needsPriorityRecomputation = true
+            } else {
+                allTasks[task.id] = task
+            }
+            availableTasks.add(req)
         }
 
         // Also add blocked tasks to our task registry for complete DAG visibility
@@ -94,13 +123,13 @@ public open class HeftScheduler : ComputeScheduler {
             selectBestHost(task)
                 ?: return SchedulingResult(SchedulingResultType.FAILURE, null, selectedRequest)
 
-        val finishTime = calculateEarliestFinishTime(task, bestHost)
+        val (startTime, finishTime) = calculateEarliestStartAndFinishTimes(task, bestHost)
 
-        hostFinishTimes[bestHost] = finishTime
-        taskFinishTimes[task.id] = finishTime
-        taskAssignments[task.id] = bestHost
+        // Book internal resources
+        updateTaskAssignment(task, bestHost, startTime, finishTime)
 
-        availableTasks.remove(selectedRequest)
+        // Mark request as consumed; it will be removed from the queue in the next iteration
+        selectedRequest.isCancelled = true
         return SchedulingResult(SchedulingResultType.SUCCESS, bestHost, selectedRequest)
     }
 
@@ -108,12 +137,28 @@ public open class HeftScheduler : ComputeScheduler {
         task: ServiceTask,
         host: HostView?,
     ) {
+        val assignedHost = host ?: taskAssignments[task.id]
+        if (assignedHost != null) {
+            val sched = hostSchedules[assignedHost]
+            if (sched != null) {
+                val it = sched.iterator()
+                while (it.hasNext()) {
+                    val a = it.next()
+                    if (a.taskId == task.id) {
+                        it.remove()
+                        break
+                    }
+                }
+                // Recompute host finish time as the latest end across remaining allocations
+                hostFinishTimes[assignedHost] = sched.maxOfOrNull { it.end } ?: 0L
+            }
+        }
         taskAssignments.remove(task.id)
         taskFinishTimes.remove(task.id)
+        taskStartTimes.remove(task.id)
         allTasks.remove(task.id)
         needsPriorityRecomputation = true
     }
-
 
     protected fun recomputeTaskPriorities() {
         upwardRanks.clear()
@@ -127,7 +172,6 @@ public open class HeftScheduler : ComputeScheduler {
         prioritizedTasks.addAll(allTasks.values.sortedByDescending { upwardRanks[it.id] ?: 0.0 })
     }
 
-
     protected fun selectHighestPriorityTask(availableTasks: List<SchedulingRequest>): SchedulingRequest? {
         // Convert available tasks to a set for quick lookup
         val availableTaskIds = availableTasks.map { it.task.id }.toSet()
@@ -140,7 +184,6 @@ public open class HeftScheduler : ComputeScheduler {
 
         return availableTasks.firstOrNull()
     }
-
 
     protected fun selectBestHost(task: ServiceTask): HostView? {
         var bestHost: HostView? = null
@@ -167,19 +210,24 @@ public open class HeftScheduler : ComputeScheduler {
     ): Boolean {
         val flavor = task.flavor
         val availableCores = host.host.getModel().coreCount - host.provisionedCpuCores
-        return availableCores >= flavor.cpuCoreCount &&
-            host.availableMemory >= flavor.memorySize
+        return availableCores >= flavor.cpuCoreCount && host.availableMemory >= flavor.memorySize
     }
 
     protected fun calculateEarliestFinishTime(
         task: ServiceTask,
         host: HostView,
     ): Long {
-        val earliestStartTime = calculateEarliestStartTime(task, host)
+        val (start, finish) = calculateEarliestStartAndFinishTimes(task, host)
+        return finish
+    }
 
-        val executionTime = estimateExecutionTime(task, host)
-
-        return earliestStartTime + executionTime
+    private fun calculateEarliestStartAndFinishTimes(
+        task: ServiceTask,
+        host: HostView,
+    ): Pair<Long, Long> {
+        val start = calculateEarliestStartTime(task, host)
+        val finish = start + estimateExecutionTime(task, host)
+        return start to finish
     }
 
     protected fun calculateEarliestStartTime(
@@ -187,12 +235,38 @@ public open class HeftScheduler : ComputeScheduler {
         host: HostView,
     ): Long {
         val parentFinishTime = getParentFinishTime(task)
+        val duration = estimateExecutionTime(task, host)
+        val sched = hostSchedules[host] ?: mutableListOf()
 
-        val hostAvailableTime = hostFinishTimes[host] ?: 0L
+        val requiredCores = task.flavor.cpuCoreCount
+        val requiredMem = task.flavor.memorySize
+        // Effective capacity left on the host right now (excluding what is already provisioned)
+        val capacityCores = host.host.getModel().coreCount - host.provisionedCpuCores
+        val capacityMem = host.availableMemory
 
-        return maxOf(parentFinishTime, hostAvailableTime)
+        if (sched.isEmpty()) {
+            return parentFinishTime
+        }
+
+        // Candidate start times: parent ready time and all allocation end times at/after it
+        val candidates = mutableListOf<Long>()
+        candidates.add(parentFinishTime)
+        for (a in sched) {
+            if (a.end >= parentFinishTime) candidates.add(a.end)
+        }
+        candidates.sort()
+
+        for (start in candidates) {
+            val end = start + duration
+            if (isWindowFeasible(sched, start, end, requiredCores, requiredMem, capacityCores, capacityMem)) {
+                return start
+            }
+        }
+
+        // If nothing fit within existing gaps, start after the latest allocation finishes
+        val lastEnd = maxOf(parentFinishTime, sched.maxOfOrNull { it.end } ?: 0L)
+        return lastEnd
     }
-
 
     protected fun getParentFinishTime(task: ServiceTask): Long {
         val parents = task.flavor.parents
@@ -214,19 +288,55 @@ public open class HeftScheduler : ComputeScheduler {
         task: ServiceTask,
         host: HostView,
     ): Long {
-        val flavor = task.flavor
-        val taskCpuDemand = flavor.cpuCoreCount.toDouble()
-        val hostCpuCapacity = host.host.getModel().coreCount.toDouble()
-
-        val baseTime = task.duration.toMillis()
-
-        // Adjust based on relative performance
-        // If task needs more cores than available, it will take longer
-        val performanceRatio = if (hostCpuCapacity > 0) taskCpuDemand / hostCpuCapacity else 1.0
-
-        return (baseTime * performanceRatio).toLong()
+        // A task's wall-clock duration is specified by its workload and does not
+        // shrink on hosts with more cores. Core count is used only for feasibility
+        // (can the host accommodate the concurrent cores), not for speedup.
+        return task.duration.toMillis()
     }
 
+    private fun isWindowFeasible(
+        allocations: List<Allocation>,
+        start: Long,
+        end: Long,
+        reqCores: Int,
+        reqMem: Long,
+        capacityCores: Int,
+        capacityMem: Long,
+    ): Boolean {
+        // Compute resource usage at start
+        var usedCores = 0
+        var usedMem = 0L
+        val events = mutableListOf<Pair<Long, AllocationEvent>>()
+        for (a in allocations) {
+            if (a.end <= start || a.start >= end) continue // no overlap with [start, end)
+            if (a.start <= start && a.end > start) {
+                usedCores += a.cpuCores
+                usedMem += a.memory
+            }
+            val s = maxOf(a.start, start)
+            val e = minOf(a.end, end)
+            // Register events inside (start, end)
+            if (s > start) events.add(s to AllocationEvent(deltaCores = a.cpuCores, deltaMem = a.memory, entering = true))
+            if (e > start) events.add(e to AllocationEvent(deltaCores = a.cpuCores, deltaMem = a.memory, entering = false))
+        }
+        if (usedCores + reqCores > capacityCores || usedMem + reqMem > capacityMem) return false
+
+        // Sort events and sweep
+        events.sortWith(compareBy<Pair<Long, AllocationEvent>> { it.first }.thenBy { if (it.second.entering) 0 else 1 })
+        for ((_, ev) in events) {
+            if (ev.entering) {
+                usedCores += ev.deltaCores
+                usedMem += ev.deltaMem
+            } else {
+                usedCores -= ev.deltaCores
+                usedMem -= ev.deltaMem
+            }
+            if (usedCores + reqCores > capacityCores || usedMem + reqMem > capacityMem) return false
+        }
+        return true
+    }
+
+    private data class AllocationEvent(val deltaCores: Int, val deltaMem: Long, val entering: Boolean)
 
     protected fun computeUpwardRank(taskId: Int): Double {
         // Return cached value if already computed
@@ -274,9 +384,37 @@ public open class HeftScheduler : ComputeScheduler {
         return totalTime / hosts.size
     }
 
+    protected fun updateTaskAssignment(
+        task: ServiceTask,
+        host: HostView,
+        finishTime: Long,
+    ) {
+        // Backward-compatible overload: infer start from finish and duration, and book resources
+        val startTime = (finishTime - estimateExecutionTime(task, host)).coerceAtLeast(0L)
+        updateTaskAssignment(task, host, startTime, finishTime)
+    }
 
-    protected fun updateTaskAssignment(task: ServiceTask, host: HostView, finishTime: Long) {
-        hostFinishTimes[host] = finishTime
+    protected fun updateTaskAssignment(
+        task: ServiceTask,
+        host: HostView,
+        startTime: Long,
+        finishTime: Long,
+    ) {
+        val sched = hostSchedules.computeIfAbsent(host) { mutableListOf() }
+        sched.add(
+            Allocation(
+                taskId = task.id,
+                start = startTime,
+                end = finishTime,
+                cpuCores = task.flavor.cpuCoreCount,
+                memory = task.flavor.memorySize,
+            ),
+        )
+        // Keep schedule sorted to speed up searches
+        sched.sortBy { it.start }
+
+        hostFinishTimes[host] = sched.maxOfOrNull { it.end } ?: finishTime
+        taskStartTimes[task.id] = startTime
         taskFinishTimes[task.id] = finishTime
         taskAssignments[task.id] = host
     }
@@ -285,16 +423,18 @@ public open class HeftScheduler : ComputeScheduler {
      * Check if a task is in a state that allows it to be scheduled.
      * Tasks that are already running, completed, terminated, or failed should not be scheduled again.
      */
-    private fun isTaskSchedulable(task: ServiceTask): Boolean {
+    protected fun isTaskSchedulable(task: ServiceTask): Boolean {
         return when (task.state) {
             TaskState.CREATED,
-            TaskState.PROVISIONING -> true
+            TaskState.PROVISIONING,
+            -> true
             TaskState.RUNNING,
             TaskState.COMPLETED,
             TaskState.TERMINATED,
             TaskState.FAILED,
             TaskState.PAUSED,
-            TaskState.DELETED -> false
+            TaskState.DELETED,
+            -> false
         }
     }
 }

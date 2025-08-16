@@ -80,6 +80,7 @@ public data class SchedulingRequest internal constructor(
 ) {
     public var isCancelled: Boolean = false
     public var timesSkipped: Int = 0
+    public var deferUntil: java.time.Instant? = null
 }
 
 public enum class SchedulingResultType {

@@ -48,13 +48,13 @@ public class HeftCarbonAwareScheduler(
     private val forecast: Boolean = true,
     private val shortForecastThreshold: Double = 0.20,
     private val longForecastThreshold: Double = 0.35,
-    private val forecastSize: Int = 128,
-    private val windowSize: Int = 128,
+    private val forecastSize: Int = 24,
+    private val windowSize: Int = 24,
     // Guardrails to limit excessive deferral
-    private val maxSkipsPerTask: Int = 6,
+    private val maxSkipsPerTask: Int = 5,
     // Planning knobs
     private val replanEvery: Duration = Duration.ofMinutes(15),
-    private val maxDeferralPerEpoch: Duration = Duration.ofHours(128),
+    private val maxDeferralPerEpoch: Duration = Duration.ofHours(24),
 ) : HeftScheduler(), CarbonReceiver {
     // Carbon model state (simplified copy of Timeshifter logic)
     private var carbonMod: CarbonModel? = null
@@ -75,10 +75,10 @@ public class HeftCarbonAwareScheduler(
      * CarbonReceiver hook.
      */
     override fun updateCarbonIntensity(newCarbonIntensity: Double) {
-        if (!forecast) {
-            noForecastUpdateCarbonIntensity(newCarbonIntensity)
-            return
-        }
+//        if (!forecast) {
+//            noForecastUpdateCarbonIntensity(newCarbonIntensity)
+//            return
+//        }
 
         val cm = carbonMod ?: return
         val forecastValues = cm.getForecast(forecastSize)

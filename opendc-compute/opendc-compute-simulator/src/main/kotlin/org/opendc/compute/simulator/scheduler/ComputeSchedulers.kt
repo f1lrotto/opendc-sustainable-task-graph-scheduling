@@ -50,6 +50,7 @@ public enum class ComputeSchedulerEnum {
     Random,
     TaskNumMemorizing,
     Timeshift,
+    SimpleTimeshift,
     Heft,
     HeftCarbonAware,
     ProvisionedCpuGpuCores,
@@ -133,6 +134,12 @@ public fun createPrefabComputeScheduler(
                 weighers = listOf(RamWeigher(multiplier = 1.0)),
                 windowSize = 168,
                 clock = clock,
+                random = SplittableRandom(seeder.nextLong()),
+            )
+        ComputeSchedulerEnum.SimpleTimeshift ->
+            SimpleTimeshiftScheduler(
+                clock = clock,
+                filters = listOf(ComputeFilter(), VCpuFilter(cpuAllocationRatio), RamFilter(ramAllocationRatio)),
                 random = SplittableRandom(seeder.nextLong()),
             )
         ComputeSchedulerEnum.Heft ->
