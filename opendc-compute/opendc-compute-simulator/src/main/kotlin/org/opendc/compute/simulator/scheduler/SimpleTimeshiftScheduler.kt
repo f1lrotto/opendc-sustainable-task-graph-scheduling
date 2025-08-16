@@ -50,6 +50,7 @@ public class SimpleTimeshiftScheduler(
 ) : HeftScheduler(), CarbonReceiver {
     private var carbonModel: CarbonModel? = null
 
+
     override fun updateCarbonIntensity(carbonIntensity: Double) {
         // No smoothing/threshold logic in the simple version.
     }
