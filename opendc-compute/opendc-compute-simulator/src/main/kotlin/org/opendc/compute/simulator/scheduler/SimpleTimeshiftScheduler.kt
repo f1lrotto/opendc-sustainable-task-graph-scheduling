@@ -50,17 +50,8 @@ public class SimpleTimeshiftScheduler(
 ) : HeftScheduler(), CarbonReceiver {
     private var carbonModel: CarbonModel? = null
 
-
-    override fun updateCarbonIntensity(carbonIntensity: Double) {
-        // No smoothing/threshold logic in the simple version.
-    }
-
     override fun setCarbonModel(carbonModel: CarbonModel) {
         this.carbonModel = carbonModel
-    }
-
-    override fun removeCarbonModel(carbonModel: CarbonModel) {
-        if (this.carbonModel === carbonModel) this.carbonModel = null
     }
 
     override fun select(iter: MutableIterator<SchedulingRequest>): SchedulingResult {
@@ -156,7 +147,7 @@ public class SimpleTimeshiftScheduler(
             }
         }
 
-        if (chosenReq == null || chosenHost == null) {
+        if (chosenReq == null) {
             return SchedulingResult(SchedulingResultType.FAILURE, null, availableRequests.first())
         }
 
@@ -188,7 +179,7 @@ public class SimpleTimeshiftScheduler(
         val latestStartMillis = estMillis + maxDeferral.toMillis() - durationMillis
         if (latestStartMillis < estMillis) return null
 
-        val step = stepMillis.toLong()
+        val step = stepMillis
         val seriesStart = ((estMillis + step - 1) / step) * step
 
         val windowSteps = ((latestStartMillis - seriesStart) / step).toInt().coerceAtLeast(0)

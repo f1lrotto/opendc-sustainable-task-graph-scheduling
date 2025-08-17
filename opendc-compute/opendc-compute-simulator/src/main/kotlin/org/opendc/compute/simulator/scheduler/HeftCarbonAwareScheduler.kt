@@ -43,25 +43,16 @@ import java.util.random.RandomGenerator
 public class HeftCarbonAwareScheduler(
     public val clock: InstantSource,
     private val filters: List<HostFilter>,
-    private val random: RandomGenerator = SplittableRandom(0),
     // Carbon-awareness parameters (defaults aligned with Timeshift scheduler behavior)
-    private val forecast: Boolean = true,
-    private val shortForecastThreshold: Double = 0.20,
-    private val longForecastThreshold: Double = 0.35,
     private val forecastSize: Int = 24,
-    private val windowSize: Int = 24,
     // Guardrails to limit excessive deferral
     private val maxSkipsPerTask: Int = 5,
     // Planning knobs
     private val replanEvery: Duration = Duration.ofMinutes(15),
     private val maxDeferralPerEpoch: Duration = Duration.ofHours(24),
-) : HeftScheduler(), CarbonReceiver {
-    // Carbon model state (simplified copy of Timeshifter logic)
+    ) : HeftScheduler() {
+    // Carbon model state
     private var carbonMod: CarbonModel? = null
-    private val pastCarbonIntensities: LinkedList<Double> = LinkedList()
-    private var carbonRunningSum: Double = 0.0
-    private var shortLowCarbon: Boolean = false
-    private var longLowCarbon: Boolean = false
 
     // Baseline/makespan windows (minimal viable scaffolding)
     private var lastReplanAt: Instant = Instant.EPOCH
@@ -71,47 +62,8 @@ public class HeftCarbonAwareScheduler(
     private val downwardRanks: MutableMap<Int, Double> = mutableMapOf()
     private var criticalPathLength: Double = 0.0
 
-    /**
-     * CarbonReceiver hook.
-     */
-    override fun updateCarbonIntensity(newCarbonIntensity: Double) {
-//        if (!forecast) {
-//            noForecastUpdateCarbonIntensity(newCarbonIntensity)
-//            return
-//        }
-
-        val cm = carbonMod ?: return
-        val forecastValues = cm.getForecast(forecastSize)
-        if (forecastValues.isEmpty()) return
-
-        val sorted = forecastValues.sorted()
-        val shortIdx = (sorted.size * shortForecastThreshold).toInt().coerceIn(0, sorted.lastIndex)
-        val longIdx = (sorted.size * longForecastThreshold).toInt().coerceIn(0, sorted.lastIndex)
-        val shortCI = sorted[shortIdx]
-        val longCI = sorted[longIdx]
-
-        shortLowCarbon = newCarbonIntensity < shortCI
-        longLowCarbon = newCarbonIntensity < longCI
-    }
-
-    override fun setCarbonModel(carbonModel: CarbonModel) {
+    public fun setCarbonModel(carbonModel: CarbonModel) {
         this.carbonMod = carbonModel
-    }
-
-    override fun removeCarbonModel(carbonModel: CarbonModel) {
-        if (this.carbonMod === carbonModel) this.carbonMod = null
-    }
-
-    private fun noForecastUpdateCarbonIntensity(newCarbonIntensity: Double) {
-        val previous = if (pastCarbonIntensities.isEmpty()) 0.0 else pastCarbonIntensities.last
-        pastCarbonIntensities.addLast(newCarbonIntensity)
-        carbonRunningSum += newCarbonIntensity
-        if (pastCarbonIntensities.size > windowSize) {
-            carbonRunningSum -= pastCarbonIntensities.removeFirst()
-        }
-        val threshold = if (pastCarbonIntensities.isEmpty()) newCarbonIntensity else carbonRunningSum / pastCarbonIntensities.size
-        shortLowCarbon = (newCarbonIntensity < threshold) && (newCarbonIntensity > previous)
-        longLowCarbon = (newCarbonIntensity < threshold)
     }
 
     override fun select(iter: MutableIterator<SchedulingRequest>): SchedulingResult {
@@ -223,7 +175,7 @@ public class HeftCarbonAwareScheduler(
             }
         }
 
-        if (chosenReq == null || chosenHost == null) {
+        if (chosenReq == null) {
             // No feasible placement now
             return SchedulingResult(SchedulingResultType.FAILURE, null, availableRequests.first())
         }
@@ -386,15 +338,6 @@ public class HeftCarbonAwareScheduler(
         return t?.duration?.toMillis() ?: 0L
     }
 
-    private fun isHighRank(task: ServiceTask): Boolean {
-        val rank = upwardRanks[task.id] ?: return false
-        // Simple top-quantile check
-        if (upwardRanks.isEmpty()) return false
-        val sorted = upwardRanks.values.sortedDescending()
-        val cutoff = sorted[(sorted.size * 0.2).coerceAtLeast(0.0).toInt().coerceAtMost(sorted.lastIndex)]
-        return rank >= cutoff
-    }
-
     private data class GreenChoice(val start: Instant, val gain_gCO2: Double)
 
     private fun bestGreenStart(
@@ -420,7 +363,7 @@ public class HeftCarbonAwareScheduler(
         if (maxStartMillis < estMillis) return null
         if (series.size < spanSteps) return null
 
-        val step = stepMillis.toLong()
+        val step = stepMillis
         val syntheticSeriesStart = ((estMillis + step - 1) / step) * step
 
         val windowSteps = ((maxStartMillis - syntheticSeriesStart) / step).toInt().coerceAtLeast(0)
