@@ -148,8 +148,7 @@ public fun createPrefabComputeScheduler(
             HeftCarbonAwareScheduler(
                 clock = clock,
                 filters = listOf(ComputeFilter(), VCpuFilter(cpuAllocationRatio), RamFilter(ramAllocationRatio)),
-                random = SplittableRandom(seeder.nextLong()),
-            )
+                )
         ComputeSchedulerEnum.ProvisionedCpuGpuCores ->
             FilterScheduler(
                 filters =
