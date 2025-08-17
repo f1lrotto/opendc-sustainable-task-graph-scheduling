@@ -143,6 +143,21 @@ public class CarbonModel extends FlowNode {
                 .toArray();
     }
 
+    /**
+     * Return the typical step duration (in millis) between forecast points.
+     * If variable, this returns the duration of the first forecast fragment.
+     */
+    public long getForecastStepMillis() {
+        int startIdx = Math.min(this.fragment_index + 1, this.fragments.size() - 1);
+        CarbonFragment first = this.fragments.get(startIdx);
+        long duration = first.getEndTime() - first.getStartTime();
+        if (duration <= 0 && startIdx + 1 < this.fragments.size()) {
+            CarbonFragment second = this.fragments.get(startIdx + 1);
+            duration = Math.max(0, second.getStartTime() - first.getStartTime());
+        }
+        return duration > 0 ? duration : 3600_000L; // default to 1h
+    }
+
     public static <T, U> List<U> castList(List<T> list, Class<U> clazz) {
         List<U> result = new ArrayList<>();
         for (T element : list) {
